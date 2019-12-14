@@ -1,7 +1,7 @@
 from functools import reduce
 from nltk.tree import Tree
-from nltk import pos_tag, word_tokenize
-from nltk import Nonterminal, induce_pcfg
+from nltk import Nonterminal, induce_pcfg, word_tokenize
+import numpy as np
 
 
 class ProbabilityTree():
@@ -15,6 +15,13 @@ class ProbabilityTree():
         for child in self.children:
             out += ' ' + str(child)
         return out + ')'
+
+    def __eq__(self, other):
+        for s, o in zip(str(self), other):
+            if s != o:
+                return False
+        return True
+
 
     def leaves(self):
         output = []
@@ -38,9 +45,9 @@ class Rule():
 
 
 class ViterbiProbParser:
-    def __init__(self, rules, probD=None):
+    def __init__(self, rules, PWLD=None):
         self.grammar = self.makeGrammar(rules)
-        self.probD = probD
+        self.PWLD = PWLD
 
     def makeGrammar(self, rules):
         output = []
@@ -79,25 +86,34 @@ class ViterbiProbParser:
             for rule, children in possibles:
                 subs = [c for c in children if isinstance(c, ProbabilityTree)]
                 p = reduce(lambda pr, t: pr * t.prob, subs, rule.prob)
-                if self.probD is not None:
+                if self.PWLD is not None:
                     if span[1] - span[0] > 1:
                         allLeaves = []
-                        prob = 1
                         for child in children:
                             if isinstance(child, ProbabilityTree):
                                 allLeaves.extend(child.leaves())
-                        headNum = 0
-                        while allLeaves[headNum] in ['the', 'a', 'an']:
-                            headNum += 1
-                        head = allLeaves[headNum]
-                        for leafIndex in range(len(allLeaves)):
-                            if leafIndex != headNum:
-                                prob *= self.probD[head][allLeaves[leafIndex]]
-                        # prob /= (len(allLeaves) - 1)
-                        p = (2 * prob * p) / (prob + p)
+                        norms = []
+                        for headNum in range(len(allLeaves)):
+                            head = allLeaves[headNum]
+                            if head in ['the', 'a', 'an']:
+                                continue
+                            z = 0
+                            if head not in self.PWLD:
+                                print(head)
+                            for leafIndex in range(len(allLeaves)):
+                                if leafIndex != headNum:
+                                    prob = self.PWLD[head].get(allLeaves[leafIndex], 0)
+                                    if prob != 0:
+                                        z += np.log(prob)
+                                    else:
+                                        z = 0
+                                        break
+                            norms.append(z)
+                        if np.sum(norms) != 0:
+                            norms = [i / np.sum(norms) for i in norms]
+                            p = 2 * np.exp(np.mean(norms)) * p / (np.exp(np.mean(norms)) + p)
                 node = rule.lhs
                 tree = ProbabilityTree(node, children, p)
-
                 c = constituents.get((span[0], span[1], rule.lhs), None)
                 if c is None or c.prob < tree.prob:
                     constituents[(span[0], span[1], rule.lhs)] = tree
@@ -115,8 +131,12 @@ class ViterbiProbParser:
             for start in range(len(tokens) - length + 1):
                 span = (start, start + length)
                 self.addPossibleConstituents(span, constituents)
-
-        return constituents.get((0, len(tokens), 'S'))
+        # for x in range(len(tokens)):
+        #     for y in range(len(tokens), x, -1):
+        #         output = constituents.get((x, y, 'S'), None)
+        #         if output is not None:
+        #             return output
+        return constituents.get((0, len(tokens), 'S'), None)
 
 def producePCFG(sentences):
     ruleCount = {}
@@ -138,20 +158,21 @@ def contextProbDict(sentences):
     contextD = {}
     for sent in sentences:
         tokens = word_tokenize(sent)
-        for i in range(len(tokens)):
+        tokens = [tok.lower() for tok in tokens]
+        for i in range(len(tokens) + 1):
             if tokens[i] not in contextD:
                 contextD[tokens[i]] = {}
-            for j in range(len(tokens)):
+            for j in range(len(tokens) + 1):
                 if i != j:
                     if tokens[j] not in contextD[tokens[i]]:
                         contextD[tokens[i]][tokens[j]] = 1
                     else:
                         contextD[tokens[i]][tokens[j]] += 1
-    probD = {}
+    PWLD = {}
     for word, freq in contextD.items():
         sumWords = sum([v for k, v in freq.items()])
-        probD[word] = {k: (v/sumWords) for k, v in freq.items()}
-    return probD
+        PWLD[word] = {k: (v/sumWords) for k, v in freq.items()}
+    return PWLD
 
 if __name__ == '__main__':
     # grammar = toy_pcfg1
@@ -228,10 +249,10 @@ if __name__ == '__main__':
                         contextD[tokens[i]][tokens[j]] = 1
                     else:
                         contextD[tokens[i]][tokens[j]] += 1
-    probD = {}
+    PWLD = {}
     for word, freq in contextD.items():
         sumWords = sum([v for k, v in freq.items()])
-        probD[word] = {k: (v / sumWords) for k, v in freq.items()}
+        PWLD[word] = {k: (v / sumWords) for k, v in freq.items()}
 
     sents = [sent1, sent2, sent3]
     trees = [Tree.fromstring(sent) for sent in sents]
@@ -241,14 +262,14 @@ if __name__ == '__main__':
     start = Nonterminal('S')
     grammar = induce_pcfg(start, productions)
     print(grammar)
-    for word, prob in probD.items():
+    for word, prob in PWLD.items():
         print(word, prob)
     rules = []
     for production in grammar.productions():
         lhs, rhs, prob = production._lhs, production._rhs, production._ProbabilisticMixIn__prob
         rhsList = [str(term) if type(term) != str else term for term in rhs]
         rules.append((str(lhs), rhsList, prob))
-    parser = ViterbiProbParser(rules, probD)
+    parser = ViterbiProbParser(rules, PWLD)
     sents = [(raw1,sent1), (raw2,sent2), (raw3,sent3)]
     for raw, parse in sents:
         ans = parser.parse(word_tokenize(raw))
